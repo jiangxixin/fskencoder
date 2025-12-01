@@ -153,12 +153,9 @@ bool decodeWavToFile(
 
     std::vector<int16_t> frame(shape.N);
 
-    // 4. 16-FSK 解调 -> codedBytes
-    std::vector<uint8_t> codedBytes;
-    codedBytes.reserve(static_cast<size_t>((totalSymbols - params.syncSymbols) / 2));
-
-    uint8_t curByte = 0;
-    int bitCountInByte = 0;
+    // 4. 16-FSK 解调 -> codedBits（注意直接是 bit 流）
+    std::vector<uint8_t> codedBits;
+    codedBits.reserve(static_cast<size_t>((totalSymbols - params.syncSymbols) * 4)); // 1 符号 4bit
 
     for (uint64_t symIdx = 0; symIdx < totalSymbols; ++symIdx) {
         if (!ifs.read(reinterpret_cast<char*>(frame.data()),
@@ -174,48 +171,38 @@ bool decodeWavToFile(
 
         int symbolIndex = detectSymbolIndex(frame.data(), cfgs); // 0..15
 
-        // 还原 4 bit（高 bit 在前）
-        for (int k = 3; k >= 0; --k) {
-            int bit = (symbolIndex >> k) & 0x1;
-            curByte |= (static_cast<uint8_t>(bit) << (7 - bitCountInByte));
-            ++bitCountInByte;
-            if (bitCountInByte == 8) {
-                codedBytes.push_back(curByte);
-                curByte = 0;
-                bitCountInByte = 0;
-            }
+        // 还原 4 bit（顺序与编码端完全一致：b3,b2,b1,b0）
+        for (int bitPos = 3; bitPos >= 0; --bitPos) {
+            int bit = (symbolIndex >> bitPos) & 0x1;
+            codedBits.push_back(static_cast<uint8_t>(bit));
         }
     }
 
-    if (codedBytes.empty()) {
-        std::cerr << "No coded bytes decoded from FSK.\n";
+    if (codedBits.empty()) {
+        std::cerr << "No coded bits decoded from FSK.\n";
         return false;
     }
 
-    // 5. codedBytes -> codedBits
-    std::vector<uint8_t> codedBits;
-    bytesToBits(codedBytes, codedBits);
-
-    // 6. 卷积 Viterbi 解码 -> bits
+    // 5. 卷积 Viterbi 解码 -> bits（原始帧的 bit 流）
     std::vector<uint8_t> bits;
     if (!convDecode(codedBits, bits)) {
         std::cerr << "Convolutional decode failed.\n";
         return false;
     }
 
-    // 7. bits -> frameBytes
+    // 6. bits -> frameBytes
     std::vector<uint8_t> frameBytes;
     bitsToBytes(bits, frameBytes);
 
-    // 8. 帧解析（marker/长度/CRC）
+    // 7. 帧解析（marker/长度/CRC）
     std::vector<uint8_t> payload;
     uint8_t seq = 0;
     if (!parseFrame(frameBytes, payload, seq)) {
-        std::cerr << "Frame parse failed.\n";
+        std::cerr << "Frame parse failed (maybe marker mismatch / CRC error).\n";
         return false;
     }
 
-    // 9. 写回原始 payload
+    // 8. 写回原始 payload
     std::ofstream ofs_out(outputBinPath, std::ios::binary);
     if (!ofs_out) {
         std::cerr << "Failed to open output file: " << outputBinPath << "\n";

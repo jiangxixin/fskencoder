@@ -115,17 +115,21 @@ bool encodeFileToWav(
 
     // 3. 帧字节 -> bit 流
     std::vector<uint8_t> bits;
-    bytesToBits(frame, bits);
+    bytesToBits(frame, bits);  // bits.size() = 8 * frame.size()
 
     // 4. 卷积编码 FEC
     std::vector<uint8_t> codedBits;
     convEncode(bits, codedBits);
 
-    // 5. FEC 后的 bit 流打包成字节 -> codedBytes
-    std::vector<uint8_t> codedBytes;
-    bitsToBytes(codedBits, codedBytes);
+    // VERY IMPORTANT:
+    // 这里 codedBits 的长度一定是 4 的倍数（可以检查一下）
+    if (codedBits.size() % 4 != 0) {
+        std::cerr << "Internal error: codedBits.size() not multiple of 4\n";
+        return false;
+    }
+    const uint64_t dataSymbols = codedBits.size() / 4; // 每 4bit 一个 16-FSK 符号
 
-    // 6. 符号形状 + LUT
+    // 5. 符号形状 + LUT
     SymbolShape shape;
     try {
         shape = computeSymbolShape(params.sampleRate, params.symbolDurationSec);
@@ -137,12 +141,10 @@ bool encodeFileToWav(
     std::array<std::vector<int16_t>, 16> waves;
     buildSymbolLUT(waves, params, shape);
 
-    // 每字节 8bit -> 两个 4bit 符号
-    uint64_t dataSymbols  = static_cast<uint64_t>(codedBytes.size()) * 2ULL;
     uint64_t totalSymbols = static_cast<uint64_t>(params.syncSymbols) + dataSymbols;
     uint64_t totalSamples = totalSymbols * shape.N;
 
-    // 7. 写 WAV 头
+    // 6. 写 WAV 头
     WavHeader header;
     try {
         header = makeWavHeader(params.sampleRate, totalSamples);
@@ -162,7 +164,7 @@ bool encodeFileToWav(
         return false;
     }
 
-    // 8. 写前导同步符号（0 和 15 交替）
+    // 7. 写前导同步符号（0 和 15 交替）
     for (int i = 0; i < params.syncSymbols; ++i) {
         int sym = (i % 2 == 0) ? 0 : 15;
         writeSymbol(ofs, waves, sym);
@@ -172,20 +174,18 @@ bool encodeFileToWav(
         }
     }
 
-    // 9. 写数据符号（每字节两个 symbol：高 nibble & 低 nibble）
-    for (uint8_t byte : codedBytes) {
-        int highNibble = (byte >> 4) & 0x0F;   // b7..b4
-        int lowNibble  = byte        & 0x0F;   // b3..b0
+    // 8. 写数据符号：每 4 bit -> 1 个 0..15 的 symbolIndex
+    for (uint64_t symIdx = 0; symIdx < dataSymbols; ++symIdx) {
+        size_t base = static_cast<size_t>(symIdx * 4);
+        uint8_t b3 = codedBits[base]     & 0x1; // 最高 bit
+        uint8_t b2 = codedBits[base + 1] & 0x1;
+        uint8_t b1 = codedBits[base + 2] & 0x1;
+        uint8_t b0 = codedBits[base + 3] & 0x1; // 最低 bit
 
-        writeSymbol(ofs, waves, highNibble);
+        uint8_t symbolIndex = static_cast<uint8_t>((b3 << 3) | (b2 << 2) | (b1 << 1) | b0);
+        writeSymbol(ofs, waves, symbolIndex);
         if (!ofs) {
-            std::cerr << "Failed while writing data symbols (high).\n";
-            return false;
-        }
-
-        writeSymbol(ofs, waves, lowNibble);
-        if (!ofs) {
-            std::cerr << "Failed while writing data symbols (low).\n";
+            std::cerr << "Failed while writing data symbols.\n";
             return false;
         }
     }
