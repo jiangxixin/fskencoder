@@ -1,5 +1,7 @@
+// src/main.cpp
 #include "encoder.h"
 #include "decoder.h"
+
 #include <iostream>
 #include <string>
 #include <stdexcept>
@@ -7,33 +9,21 @@
 
 static void printUsage(const char* prog) {
     std::cout << "Usage:\n"
-              << "  Encode (16-FSK + Frame + FEC):\n"
+              << "  Encode (16-FSK DFT-bin + Frame + FEC):\n"
               << "    " << prog << " encode -i <input.bin> -o <output.wav> [options]\n"
-              << "  Decode (16-FSK + Frame + FEC):\n"
+              << "  Decode (16-FSK DFT-bin + Frame + FEC):\n"
               << "    " << prog << " decode -i <input.wav> -o <output.bin> [options]\n"
               << "\nOptions (encode & decode):\n"
               << "    --sr <sampleRate>          (default 44100)\n"
               << "    --symdur <seconds>         (default 0.001, symbol duration)\n"
               << "    --bitdur <seconds>         (alias of --symdur)\n"
               << "    --sync <symbols>           (default 64, number of sync symbols)\n"
-              << "    --f0  <freqHz>             (default 2000)\n"
-              << "    --f1  <freqHz>             (default 2300)\n"
-              << "    --f2  <freqHz>             (default 2600)\n"
-              << "    --f3  <freqHz>             (default 2900)\n"
-              << "    --f4  <freqHz>             (default 3200)\n"
-              << "    --f5  <freqHz>             (default 3500)\n"
-              << "    --f6  <freqHz>             (default 3800)\n"
-              << "    --f7  <freqHz>             (default 4100)\n"
-              << "    --f8  <freqHz>             (default 4400)\n"
-              << "    --f9  <freqHz>             (default 4700)\n"
-              << "    --f10 <freqHz>             (default 5000)\n"
-              << "    --f11 <freqHz>             (default 5300)\n"
-              << "    --f12 <freqHz>             (default 5600)\n"
-              << "    --f13 <freqHz>             (default 5900)\n"
-              << "    --f14 <freqHz>             (default 6200)\n"
-              << "    --f15 <freqHz>             (default 6500)\n"
+              << "    --bin0  <k>                (DFT bin index for symbol 0)\n"
+              << "    --bin1  <k>                ...\n"
+              << "    --bin15 <k>                (DFT bin index for symbol 15)\n"
+              << "        # 实际频率 f_k = bin_k * sr / N, N = symdur * sr\n"
               << "\nEncode-only options:\n"
-              << "    --amp <amplitude>          (default 12000)\n";
+              << "    --amp <amplitude>          (default 12000, 16-bit PCM amplitude)\n";
 }
 
 int main(int argc, char** argv) {
@@ -43,10 +33,11 @@ int main(int argc, char** argv) {
     }
 
     std::string mode = argv[1];
+
     if (mode == "encode") {
         std::string inputBin;
         std::string outputWav;
-        EncodeParams params;
+        EncodeParams params; // 带默认值
 
         for (int i = 2; i < argc; ++i) {
             std::string arg = argv[i];
@@ -72,18 +63,20 @@ int main(int argc, char** argv) {
             } else if (arg == "--sync") {
                 needValue(arg);
                 params.syncSymbols = std::stoi(argv[++i]);
-            } else if (arg.rfind("--f", 0) == 0 && arg.size() >= 3) {
-                needValue(arg);
-                // arg like "--f0", "--f10"
-                int idx = std::stoi(arg.substr(3));
-                if (idx < 0 || idx >= 16) {
-                    std::cerr << "Frequency index out of range: " << idx << "\n";
-                    return 1;
-                }
-                params.freqs[idx] = std::stod(argv[++i]);
             } else if (arg == "--amp") {
                 needValue(arg);
                 params.amplitude = static_cast<int16_t>(std::stoi(argv[++i]));
+            } else if (arg.rfind("--bin", 0) == 0) {
+                // 解析 --bin0 .. --bin15
+                // arg 形如 "--bin0" 或 "--bin10"
+                needValue(arg);
+                std::string idxStr = arg.substr(5); // 去掉前缀 "--bin"
+                int idx = std::stoi(idxStr);
+                if (idx < 0 || idx >= 16) {
+                    std::cerr << "Bin index out of range (0..15): " << idx << "\n";
+                    return 1;
+                }
+                params.bins[idx] = std::stoi(argv[++i]);
             } else {
                 std::cerr << "Unknown option: " << arg << "\n";
                 printUsage(argv[0]);
@@ -106,7 +99,7 @@ int main(int argc, char** argv) {
     } else if (mode == "decode") {
         std::string inputWav;
         std::string outputBin;
-        DecodeParams params;
+        DecodeParams params; // 带默认值
 
         for (int i = 2; i < argc; ++i) {
             std::string arg = argv[i];
@@ -132,14 +125,15 @@ int main(int argc, char** argv) {
             } else if (arg == "--sync") {
                 needValue(arg);
                 params.syncSymbols = std::stoi(argv[++i]);
-            } else if (arg.rfind("--f", 0) == 0 && arg.size() >= 3) {
+            } else if (arg.rfind("--bin", 0) == 0) {
                 needValue(arg);
-                int idx = std::stoi(arg.substr(3));
+                std::string idxStr = arg.substr(5); // "--bin" 长度为5
+                int idx = std::stoi(idxStr);
                 if (idx < 0 || idx >= 16) {
-                    std::cerr << "Frequency index out of range: " << idx << "\n";
+                    std::cerr << "Bin index out of range (0..15): " << idx << "\n";
                     return 1;
                 }
-                params.freqs[idx] = std::stod(argv[++i]);
+                params.bins[idx] = std::stoi(argv[++i]);
             } else {
                 std::cerr << "Unknown option: " << arg << "\n";
                 printUsage(argv[0]);
