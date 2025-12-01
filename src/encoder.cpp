@@ -1,3 +1,4 @@
+// src/encoder.cpp
 #include "encoder.h"
 #include "wav_io.h"
 #include "fec.h"
@@ -30,14 +31,24 @@ SymbolShape computeSymbolShape(uint32_t sampleRate, double symbolDurationSec) {
 }
 
 // 预计算 16 个频率对应的“一个符号波形” LUT
+// 频率来自 DFT bin: f_k = bin * Fs / N
 void buildSymbolLUT(
     std::array<std::vector<int16_t>, 16>& waves,
     const EncodeParams& params,
     const SymbolShape& shape
 ) {
+    double binWidth = static_cast<double>(params.sampleRate) /
+                      static_cast<double>(shape.N);
+
     for (int i = 0; i < 16; ++i) {
+        int bin = params.bins[i];
+        if (bin <= 0 || bin >= static_cast<int>(shape.N / 2)) {
+            throw std::runtime_error("Invalid bin index for 16-FSK (must be in (0, N/2))");
+        }
+
+        double f = bin * binWidth;
         waves[i].resize(shape.N);
-        double f = params.freqs[i];
+
         for (uint32_t n = 0; n < shape.N; ++n) {
             double t = static_cast<double>(n) / params.sampleRate;
             double v = params.amplitude * std::sin(2.0 * PI * f * t);
@@ -121,13 +132,11 @@ bool encodeFileToWav(
     std::vector<uint8_t> codedBits;
     convEncode(bits, codedBits);
 
-    // VERY IMPORTANT:
-    // 这里 codedBits 的长度一定是 4 的倍数（可以检查一下）
     if (codedBits.size() % 4 != 0) {
         std::cerr << "Internal error: codedBits.size() not multiple of 4\n";
         return false;
     }
-    const uint64_t dataSymbols = codedBits.size() / 4; // 每 4bit 一个 16-FSK 符号
+    const uint64_t dataSymbols = codedBits.size() / 4; // 每 4bit 一个 symbol
 
     // 5. 符号形状 + LUT
     SymbolShape shape;
@@ -139,7 +148,12 @@ bool encodeFileToWav(
     }
 
     std::array<std::vector<int16_t>, 16> waves;
-    buildSymbolLUT(waves, params, shape);
+    try {
+        buildSymbolLUT(waves, params, shape);
+    } catch (const std::exception& e) {
+        std::cerr << "Error in buildSymbolLUT: " << e.what() << "\n";
+        return false;
+    }
 
     uint64_t totalSymbols = static_cast<uint64_t>(params.syncSymbols) + dataSymbols;
     uint64_t totalSamples = totalSymbols * shape.N;
@@ -191,6 +205,7 @@ bool encodeFileToWav(
     }
 
     std::cout << "Encoded " << payload.size()
-              << " bytes payload (frame+FEC+16-FSK) to " << outputWavPath << "\n";
+              << " bytes payload (frame+FEC+16-FSK DFT-bin) to "
+              << outputWavPath << "\n";
     return true;
 }
