@@ -1,3 +1,4 @@
+// src/decoder.cpp
 #include "decoder.h"
 #include "wav_io.h"
 #include "fec.h"
@@ -14,6 +15,7 @@
 
 namespace {
 
+// 使用 float 精度已经足够
 constexpr float PI_F = 3.14159265358979323846f;
 
 struct SymbolShape {
@@ -28,12 +30,14 @@ SymbolShape computeSymbolShape(uint32_t sampleRate, double symbolDurationSec) {
     return { N };
 }
 
-// Goertzel 配置
+// ---------------- Goertzel 部分 ----------------
+
 struct GoertzelConfig {
-    float coeff;
-    uint32_t N;
+    float coeff;   // 2*cos(omega)
+    uint32_t N;    // 窗口长度（符号长度）
 };
 
+// ✅ 正确写法：直接用目标频率 f 和 Fs 求 ω = 2πf/Fs，和 N 无关
 GoertzelConfig makeGoertzelConfig(
     uint32_t sampleRate,
     double targetFreq,
@@ -42,12 +46,17 @@ GoertzelConfig makeGoertzelConfig(
     GoertzelConfig cfg{};
     cfg.N = N;
 
-    float k     = 0.5f + static_cast<float>(N * targetFreq / sampleRate);
-    float omega = 2.0f * PI_F * k / static_cast<float>(N);
-    cfg.coeff   = 2.0f * std::cos(omega);
+    // 目标频率的角频率
+    float omega = 2.0f * PI_F *
+                  static_cast<float>(targetFreq) /
+                  static_cast<float>(sampleRate);
+
+    // Goertzel 迭代公式中的系数
+    cfg.coeff = 2.0f * std::cos(omega);
     return cfg;
 }
 
+// 计算某个频率分量的“能量”
 float goertzelPower(
     const int16_t* data,
     const GoertzelConfig& cfg
@@ -85,6 +94,8 @@ int detectSymbolIndex(
 }
 
 } // namespace
+
+// ---------------- 对外主函数 ----------------
 
 bool decodeWavToFile(
     const std::string& inputWavPath,
@@ -148,14 +159,18 @@ bool decodeWavToFile(
     // 3. 预计算 16 个频率的 Goertzel 配置
     std::array<GoertzelConfig, 16> cfgs;
     for (int i = 0; i < 16; ++i) {
-        cfgs[i] = makeGoertzelConfig(params.sampleRate, params.freqs[i], shape.N);
+        cfgs[i] = makeGoertzelConfig(
+            params.sampleRate,
+            params.freqs[i],
+            shape.N
+        );
     }
 
     std::vector<int16_t> frame(shape.N);
 
-    // 4. 16-FSK 解调 -> codedBits（注意直接是 bit 流）
+    // 4. 16-FSK 解调 -> codedBits（FEC 之前的 bit 流）
     std::vector<uint8_t> codedBits;
-    codedBits.reserve(static_cast<size_t>((totalSymbols - params.syncSymbols) * 4)); // 1 符号 4bit
+    codedBits.reserve(static_cast<size_t>((totalSymbols - params.syncSymbols) * 4)); // 1 符号 4 bit
 
     for (uint64_t symIdx = 0; symIdx < totalSymbols; ++symIdx) {
         if (!ifs.read(reinterpret_cast<char*>(frame.data()),
@@ -164,14 +179,14 @@ bool decodeWavToFile(
             break;
         }
 
-        // 前 syncSymbols 个符号作为同步，扔掉
+        // 丢掉前 syncSymbols 个同步符号
         if (symIdx < static_cast<uint64_t>(params.syncSymbols)) {
             continue;
         }
 
         int symbolIndex = detectSymbolIndex(frame.data(), cfgs); // 0..15
 
-        // 还原 4 bit（顺序与编码端完全一致：b3,b2,b1,b0）
+        // 按编码端顺序恢复 4bit：b3,b2,b1,b0
         for (int bitPos = 3; bitPos >= 0; --bitPos) {
             int bit = (symbolIndex >> bitPos) & 0x1;
             codedBits.push_back(static_cast<uint8_t>(bit));
@@ -183,26 +198,26 @@ bool decodeWavToFile(
         return false;
     }
 
-    // 5. 卷积 Viterbi 解码 -> bits（原始帧的 bit 流）
+    // 5. 卷积译码 → 原始帧的 bit 流
     std::vector<uint8_t> bits;
     if (!convDecode(codedBits, bits)) {
         std::cerr << "Convolutional decode failed.\n";
         return false;
     }
 
-    // 6. bits -> frameBytes
+    // 6. bit 流 → 帧字节
     std::vector<uint8_t> frameBytes;
     bitsToBytes(bits, frameBytes);
 
-    // 7. 帧解析（marker/长度/CRC）
+    // 7. 解析帧（marker/length/CRC）
     std::vector<uint8_t> payload;
     uint8_t seq = 0;
     if (!parseFrame(frameBytes, payload, seq)) {
-        std::cerr << "Frame parse failed (maybe marker mismatch / CRC error).\n";
+        std::cerr << "Frame parse failed (marker or CRC error).\n";
         return false;
     }
 
-    // 8. 写回原始 payload
+    // 8. 写回原始 payload 到输出文件
     std::ofstream ofs_out(outputBinPath, std::ios::binary);
     if (!ofs_out) {
         std::cerr << "Failed to open output file: " << outputBinPath << "\n";
